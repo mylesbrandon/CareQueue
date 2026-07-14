@@ -1,7 +1,5 @@
 # CareQueue
 
-CareQueue is now structured as a Next.js operations app rather than a static browser prototype.
-
 ## App structure
 
 - `/` Adult Ops dashboard
@@ -11,7 +9,6 @@ CareQueue is now structured as a Next.js operations app rather than a static bro
 - `/metrics` Metrics / Trends
 - `/settings` Settings
 
-The app shell uses a fixed left sidebar and an ops-first desktop layout. The home page is the Adult Ops dashboard.
 
 ## Key workflow
 
