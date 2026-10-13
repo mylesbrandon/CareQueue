@@ -1,25 +1,18 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { DataTable } from "../../components/data-table";
-import { getWorkspaceDemoData, WORKSPACES } from "../../lib/carequeue-data";
-
-const adultDemo = getWorkspaceDemoData(WORKSPACES.adult.id).nurses;
-const specialtyDemo = getWorkspaceDemoData(WORKSPACES.specialty.id).nurses;
+import { useDemo } from "../../components/demo-provider";
 
 export default function TeamsPage() {
-  const [adultNurses, setAdultNurses] = useState(adultDemo);
-  const [specialtyNurses, setSpecialtyNurses] = useState(specialtyDemo);
+  const { session, updateNurse } = useDemo();
+  const adultNurses = session.workspaces.adult.nurses;
+  const specialtyNurses = session.workspaces.specialty.nurses;
   const [search, setSearch] = useState("");
 
   const normalizedSearch = search.trim().toLowerCase();
   const adultRows = useMemo(() => filterNurses(adultNurses, normalizedSearch), [adultNurses, normalizedSearch]);
   const specialtyRows = useMemo(() => filterNurses(specialtyNurses, normalizedSearch), [specialtyNurses, normalizedSearch]);
-
-  const updateNurse = (workspaceId, nurseId, field, value) => {
-    const setter = workspaceId === "adult" ? setAdultNurses : setSpecialtyNurses;
-    setter((current) => current.map((nurse) => nurse.nurseId === nurseId ? { ...nurse, [field]: value } : nurse));
-  };
 
   const adultColumns = createTeamColumns("adult", updateNurse);
   const specialtyColumns = createTeamColumns("specialty", updateNurse);
@@ -37,12 +30,13 @@ export default function TeamsPage() {
             type="search"
             value={search}
             onChange={(event) => setSearch(event.target.value)}
-            placeholder="Search nurse, manager, client, state"
+            aria-label="Search nurses" placeholder="Search nurse, manager, client, state"
           />
-          <button className="ghost-action">Sync roster</button>
+
         </div>
       </header>
 
+      <p className="notice">Roster changes save in this browser. Generate a new draft to apply changes; existing published snapshots stay locked. Separate multiple values with semicolons.</p>
       <div className="panel page-panel">
         <div className="panel-header">
           <div className="panel-label">Adult roster</div>
@@ -89,14 +83,14 @@ function createTeamColumns(workspaceId, onUpdate) {
       id: "coveredClients",
       header: "Clients covered",
       cell: ({ row }) => (
-        <input
-          className="table-input"
+        <RosterInput
+          label={`Clients for ${row.original.nurseName}`}
           value={row.original.coveredClients.join("; ")}
-          onChange={(event) => onUpdate(
+          onCommit={(value) => onUpdate(
             workspaceId,
             row.original.nurseId,
             "coveredClients",
-            event.target.value.split(";").map((item) => item.trim()).filter(Boolean)
+            value.split(";").map((item) => item.trim()).filter(Boolean)
           )}
         />
       )
@@ -106,14 +100,14 @@ function createTeamColumns(workspaceId, onUpdate) {
       id: "licensedStates",
       header: "States licensed",
       cell: ({ row }) => (
-        <input
-          className="table-input"
+        <RosterInput
+          label={`Licenses for ${row.original.nurseName}`}
           value={row.original.licensedStates.join("; ")}
-          onChange={(event) => onUpdate(
+          onCommit={(value) => onUpdate(
             workspaceId,
             row.original.nurseId,
             "licensedStates",
-            event.target.value.split(";").map((item) => item.trim()).filter(Boolean)
+            value.split(";").map((item) => item.trim().toUpperCase()).filter(Boolean)
           )}
         />
       )
@@ -123,14 +117,14 @@ function createTeamColumns(workspaceId, onUpdate) {
       id: "capabilities",
       header: "Capability",
       cell: ({ row }) => (
-        <input
-          className="table-input"
+        <RosterInput
+          label={`Capabilities for ${row.original.nurseName}`}
           value={row.original.capabilities.join("; ")}
-          onChange={(event) => onUpdate(
+          onCommit={(value) => onUpdate(
             workspaceId,
             row.original.nurseId,
             "capabilities",
-            event.target.value.split(";").map((item) => item.trim()).filter(Boolean)
+            value.split(";").map((item) => item.trim()).filter(Boolean)
           )}
         />
       )
@@ -141,9 +135,10 @@ function createTeamColumns(workspaceId, onUpdate) {
       cell: ({ row }) => (
         <input
           className="table-input compact-input"
-          type="number"
+          type="number" min="0" step="1" max="1000"
+          aria-label={`Capacity for ${row.original.nurseName}`}
           value={row.original.dailyCapacity}
-          onChange={(event) => onUpdate(workspaceId, row.original.nurseId, "dailyCapacity", Number(event.target.value) || 0)}
+          onChange={(event) => onUpdate(workspaceId, row.original.nurseId, "dailyCapacity", Math.min(1000, Math.max(0, Math.trunc(Number(event.target.value) || 0))))}
         />
       )
     },
@@ -153,6 +148,7 @@ function createTeamColumns(workspaceId, onUpdate) {
       cell: ({ row }) => (
         <button
           className={`status-toggle ${row.original.active ? "active" : ""}`}
+          aria-label={`Active status for ${row.original.nurseName}`} aria-pressed={row.original.active}
           onClick={() => onUpdate(workspaceId, row.original.nurseId, "active", !row.original.active)}
         >
           {row.original.active ? "Active" : "Inactive"}
@@ -169,4 +165,13 @@ function filterNurses(nurses, search) {
       .toLowerCase()
       .includes(search);
   });
+}
+
+function RosterInput({ label, value, onCommit }) {
+  const [text, setText] = useState(value);
+  useEffect(() => setText(value), [value]);
+  return <input className="table-input" aria-label={label} value={text}
+    onChange={(event) => setText(event.target.value)}
+    onBlur={() => { if (text !== value) onCommit(text); }}
+    onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }} />;
 }

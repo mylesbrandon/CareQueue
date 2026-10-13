@@ -1,12 +1,19 @@
 "use client";
 
 import { DataTable } from "../../components/data-table";
-import { getDemoTrendRows } from "../../lib/carequeue-data";
+import { useDemo } from "../../components/demo-provider";
+import { summarizeRun } from "../../lib/run-history";
+import { useState } from "react";
 
 export default function MetricsPage() {
-  const rows = getDemoTrendRows();
+  const { session } = useDemo();
+  const [workspaceId, setWorkspaceId] = useState("adult");
+  const runs = session.history.filter((entry) => entry.workspaceId === workspaceId).slice(0, 10).reverse().map(summarizeRun);
+  const rows = runs.map((run, index) => ({ ...run, day: `Run ${index + 1}`, highRiskCoverage: run.highRiskCoverage ?? 0, publishRate: run.publishedAssignments + run.overflowCount ? Math.round(run.publishedAssignments / (run.publishedAssignments + run.overflowCount) * 100) : 0 }));
+  const filter = <label>Workspace <select className="table-select" value={workspaceId} onChange={(event) => setWorkspaceId(event.target.value)}><option value="adult">Adult Ops</option><option value="specialty">Specialty Ops</option></select></label>;
+  if (!rows.length) return <section className="page-shell"><h1 className="workspace-title">Coverage and aging trends</h1>{filter}<div className="panel page-panel empty-note">Publish a run in this workspace to see measured results. Charts are calculated from your saved snapshots.</div></section>;
   const latest = rows[rows.length - 1];
-  const previous = rows[rows.length - 2];
+  const previous = rows[rows.length - 2] || latest;
   const averageCoverage = Math.round(rows.reduce((sum, row) => sum + row.highRiskCoverage, 0) / rows.length);
   const averageOverflow = Number((rows.reduce((sum, row) => sum + row.overflowCount, 0) / rows.length).toFixed(1));
   const averageAge = Number((rows.reduce((sum, row) => sum + row.averageCaseAge, 0) / rows.length).toFixed(1));
@@ -14,7 +21,7 @@ export default function MetricsPage() {
   const columns = [
     {
       accessorKey: "day",
-      header: "Day"
+      header: "Run"
     },
     {
       accessorKey: "highRiskCoverage",
@@ -23,7 +30,7 @@ export default function MetricsPage() {
     },
     {
       accessorKey: "publishRate",
-      header: "Publish rate",
+      header: "Assignment rate",
       cell: ({ row }) => `${row.original.publishRate}%`
     },
     {
@@ -46,9 +53,11 @@ export default function MetricsPage() {
         </div>
       </header>
 
+      {filter}
+      <p className="notice">Latest {rows.length} published runs in this browser. Coverage measures the high-risk cases open at the start of each run; zero means no high-risk cases when the denominator is empty. It is an operational demo metric, not a clinical outcome.</p>
       <section className="history-summary-grid">
         <SummaryCard label="Latest high-risk coverage" value={`${latest.highRiskCoverage}%`} delta={formatDelta(latest.highRiskCoverage - previous.highRiskCoverage, "%")} />
-        <SummaryCard label="Latest publish rate" value={`${latest.publishRate}%`} delta={formatDelta(latest.publishRate - previous.publishRate, "%")} />
+        <SummaryCard label="Latest assignment rate" value={`${latest.publishRate}%`} delta={formatDelta(latest.publishRate - previous.publishRate, "%")} />
         <SummaryCard label="Average overflow" value={averageOverflow} />
         <SummaryCard label="Average case age" value={`${averageAge}d`} />
       </section>
@@ -57,11 +66,11 @@ export default function MetricsPage() {
         <div className="panel page-panel">
           <div className="panel-header">
             <div className="panel-label">Coverage rates</div>
-            <h2>Daily coverage and publish trend</h2>
+            <h2>Coverage across published runs</h2>
           </div>
           <div className="chart-legend">
             <LegendItem label="High-risk coverage" tone="blue" />
-            <LegendItem label="Publish rate" tone="green" />
+            <LegendItem label="Assignment rate" tone="green" />
           </div>
           <LineTrendChart
             rows={rows}
@@ -69,11 +78,11 @@ export default function MetricsPage() {
               { key: "highRiskCoverage", color: "var(--blue)" },
               { key: "publishRate", color: "var(--green)" }
             ]}
-            minValue={70}
+            minValue={0}
             maxValue={100}
             tickFormatter={(value) => `${Math.round(value)}%`}
           />
-          <p className="chart-caption">High-risk coverage should trend up. Publish rate should stay consistently above it.</p>
+          <p className="chart-caption">High-risk coverage and overall assignment rate can differ because each uses a different denominator.</p>
         </div>
 
         <div className="panel page-panel">
@@ -101,8 +110,8 @@ export default function MetricsPage() {
             series={[
               { key: "averageCaseAge", color: "var(--red)" }
             ]}
-            minValue={2}
-            maxValue={3.2}
+            minValue={0}
+            maxValue={Math.max(1, ...rows.map((row) => row.averageCaseAge)) + 1}
             tickFormatter={(value) => `${value.toFixed(1)}d`}
           />
           <p className="chart-caption">Case age should move down as assignment coverage stabilizes.</p>
@@ -111,8 +120,8 @@ export default function MetricsPage() {
 
       <div className="panel page-panel">
         <div className="panel-header">
-          <div className="panel-label">Daily detail</div>
-          <h2>Exact values for recent trend data</h2>
+          <div className="panel-label">Run detail</div>
+          <h2>Values from saved published snapshots</h2>
         </div>
         <DataTable
           data={rows}

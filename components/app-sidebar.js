@@ -12,7 +12,7 @@ const NAV_ITEMS = [
   { href: "/settings", label: "Settings" }
 ];
 
-export function AppSidebar({ todayLabel }) {
+export function AppSidebar() {
   const pathname = usePathname();
 
   return (
@@ -21,7 +21,7 @@ export function AppSidebar({ todayLabel }) {
         <div className="sidebar-brand-mark">CQ</div>
         <div>
           <div className="sidebar-brand-name">CareQueue</div>
-          <div className="sidebar-brand-date">{todayLabel}</div>
+          <div className="sidebar-brand-date">Assignment operations</div>
         </div>
       </div>
 
@@ -36,6 +36,7 @@ export function AppSidebar({ todayLabel }) {
               key={item.href}
               href={item.href}
               className={`sidebar-link${isActive ? " active" : ""}`}
+              aria-current={isActive ? "page" : undefined}
             >
               {item.label}
             </Link>

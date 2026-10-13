@@ -43,7 +43,7 @@ export function DataTable({
                 const sorted = header.column.getIsSorted();
 
                 return (
-                  <th key={header.id}>
+                  <th key={header.id} scope="col" aria-sort={sorted === "asc" ? "ascending" : sorted === "desc" ? "descending" : undefined}>
                     {header.isPlaceholder ? null : canSort ? (
                       <button
                         type="button"
