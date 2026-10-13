@@ -1,4 +1,5 @@
 import "./globals.css";
+import { DemoProvider } from "../components/demo-provider";
 import { AppSidebar } from "../components/app-sidebar";
 
 export const metadata = {
@@ -7,19 +8,13 @@ export const metadata = {
 };
 
 export default function RootLayout({ children }) {
-  const todayLabel = new Intl.DateTimeFormat("en-US", {
-    weekday: "short",
-    month: "short",
-    day: "numeric",
-    year: "numeric"
-  }).format(new Date());
-
   return (
     <html lang="en">
       <body>
+        <a className="skip-link" href="#main-content">Skip to workspace</a>
         <div className="app-frame">
-          <AppSidebar todayLabel={todayLabel} />
-          <main className="app-main">{children}</main>
+          <AppSidebar />
+          <main className="app-main" id="main-content"><DemoProvider>{children}</DemoProvider></main>
         </div>
       </body>
     </html>

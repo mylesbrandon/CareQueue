@@ -30,3 +30,7 @@ pnpm-debug.log*
 Thumbs.db
 .idea/
 .vscode/
+
+# Browser test output
+playwright-report/
+test-results/

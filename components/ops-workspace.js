@@ -1,188 +1,117 @@
 "use client";
 
-import { useDeferredValue, useMemo, useState, useTransition } from "react";
+import { useDeferredValue, useMemo, useState } from "react";
 import { DataTable } from "./data-table";
-import {
-  WORKSPACES,
-  buildCaseDrawerModel,
-  generateDraftPlan,
-  getEligibleNurseOptions
-} from "../lib/carequeue-data";
+import { Modal } from "./modal";
+import { useDemo } from "./demo-provider";
+import { WORKSPACES, buildCaseDrawerModel, getEligibleNurseOptions } from "../lib/carequeue-data";
+import { createWorkflow, applyOverride, reviewWorkflow, publishWorkflow, startNextRun, getWorkflowInputs } from "../lib/carequeue-workflow";
 
-export function OpsWorkspace({ workspaceId, initialCases, initialNurses }) {
+export function OpsWorkspace({ workspaceId }) {
+  const { session, saveWorkflow } = useDemo();
+  const source = session.workspaces[workspaceId];
+  const initial = useMemo(() => source.workflow || createWorkflow({ workspaceId, cases: source.cases, nurses: source.nurses }), [workspaceId, source.cases, source.nurses, source.workflow]);
+  const draftState = source.workflow || initial;
   const workspace = WORKSPACES[workspaceId];
-  const initialDraftState = useMemo(
-    () => createDraftState(workspaceId, initialCases, initialNurses),
-    [workspaceId, initialCases, initialNurses]
-  );
-  const [cases, setCases] = useState(initialCases);
-  const [nurses, setNurses] = useState(initialNurses);
-  const [isPending, startTransition] = useTransition();
   const [assignmentSearch, setAssignmentSearch] = useState("");
   const [assignmentSort, setAssignmentSort] = useState("assigned");
   const [overflowSearch, setOverflowSearch] = useState("");
   const [selectedCase, setSelectedCase] = useState(null);
-  const [expandedGroups, setExpandedGroups] = useState(() => getDefaultExpandedGroups(initialDraftState.plan.assignmentGroups));
-  const [draftState, setDraftState] = useState(initialDraftState);
-
+  const [override, setOverride] = useState(null);
+  const [confirmation, setConfirmation] = useState(null);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [expandedGroups, setExpandedGroups] = useState(() => getDefaultExpandedGroups(draftState.plan.assignmentGroups));
   const deferredAssignmentSearch = useDeferredValue(assignmentSearch);
   const deferredOverflowSearch = useDeferredValue(overflowSearch);
-  const assignmentGroups = useMemo(() => {
-    return filterAndSortAssignmentGroups(draftState.plan.assignmentGroups, deferredAssignmentSearch, assignmentSort);
-  }, [draftState.plan.assignmentGroups, deferredAssignmentSearch, assignmentSort]);
-  const overflowRows = useMemo(() => {
-    return filterOverflowRows(draftState.plan.overflow, deferredOverflowSearch);
-  }, [draftState.plan.overflow, deferredOverflowSearch]);
+  const assignmentGroups = filterAndSortAssignmentGroups(draftState.plan.assignmentGroups, deferredAssignmentSearch, assignmentSort);
+  const overflowRows = filterOverflowRows(draftState.plan.overflow, deferredOverflowSearch);
+  const locked = draftState.stage === "published";
+  const editingDisabled = locked || source.rosterChanged;
+  const inputs = { cases: source.cases, nurses: source.nurses };
 
-  const toggleGroup = (nurseId) => {
-    setExpandedGroups((current) => {
-      const next = new Set(current);
-      if (next.has(nurseId)) next.delete(nurseId);
-      else next.add(nurseId);
+  function transition(action, message, publish = false) {
+    try {
+      const next = action();
+      saveWorkflow(workspaceId, next, publish);
+      setError("");
+      setNotice(message);
       return next;
-    });
-  };
+    } catch (failure) {
+      setError(failure.message);
+      return null;
+    }
+  }
+
+  const toggleGroup = (nurseId) => setExpandedGroups((current) => {
+    const next = new Set(current);
+    if (next.has(nurseId)) next.delete(nurseId); else next.add(nurseId);
+    return next;
+  });
 
   const openCase = (caseItem, nurse, overflowReason) => {
-    setSelectedCase(buildCaseDrawerModel({ workspaceId, caseItem, nurse, overflowReason }));
+    const assigned = draftState.plan.assignmentGroups.find((group) => group.assignedCases.some((item) => item.caseId === caseItem.caseId));
+    const model = buildCaseDrawerModel({ workspaceId, caseItem, nurse: nurse || assigned?.nurse, overflowReason, referenceDate: draftState.plan.referenceDate, stage: draftState.stage });
+    if (locked && assigned) model.assignmentStatus = "Published";
+    setSelectedCase(model);
   };
 
-  const regenerateDraft = (nextCases = cases, nextNurses = nurses, reason = "Draft regenerated from current morning data.") => {
-    const timestamp = new Date().toISOString();
-    const nextDraft = createDraftState(workspaceId, nextCases, nextNurses, timestamp);
-
-    setDraftState((current) => ({
-      ...nextDraft,
-      stage: "draft",
-      recentChanges: [{ message: reason, at: timestamp }].concat(current.recentChanges).slice(0, 8),
-      overrideLog: []
-    }));
-    setExpandedGroups(getDefaultExpandedGroups(nextDraft.plan.assignmentGroups));
+  const generate = () => {
+    const next = transition(() => startNextRun(draftState, inputs), "New draft generated using the current roster and remaining cases.");
+    if (next) setExpandedGroups(getDefaultExpandedGroups(next.plan.assignmentGroups));
+    setConfirmation(null);
   };
-
   const handleGenerate = () => {
-    startTransition(() => {
-      regenerateDraft(cases, nurses, "Generated a new draft assignment run.");
-    });
+    if (!locked && draftState.overrideLog.length) setConfirmation("regenerate");
+    else generate();
   };
-
-  const handleRefresh = () => {
-    startTransition(() => {
-      const freshCases = initialCases.map((item) => ({ ...item }));
-      const freshNurses = initialNurses.map((item) => ({ ...item }));
-      setCases(freshCases);
-      setNurses(freshNurses);
-      regenerateDraft(freshCases, freshNurses, "Refreshed data and rebuilt the draft.");
-    });
-  };
-
-  const handleReview = () => {
-    const timestamp = new Date().toISOString();
-    setDraftState((current) => ({
-      ...current,
-      stage: "review",
-      recentChanges: [{ message: "Moved draft into review.", at: timestamp }].concat(current.recentChanges).slice(0, 8)
-    }));
-  };
-
+  const handleReview = () => transition(() => reviewWorkflow(draftState, inputs), "Review recorded. Publish when you have checked assignments and remaining alerts.");
   const handlePublish = () => {
-    const timestamp = new Date().toISOString();
-    setDraftState((current) => ({
-      ...current,
-      stage: "published",
-      publishedAt: timestamp,
-      recentChanges: [{ message: "Published assignments for the day.", at: timestamp }].concat(current.recentChanges).slice(0, 8)
-    }));
+    const next = transition(() => publishWorkflow(draftState, inputs), "Published snapshot saved. Assignments are locked and available in Assignment Runs.", true);
+    if (next) setConfirmation(null);
   };
 
   const handleExport = () => {
-    const rows = [["nurseName", "memberId", "client", "state", "caseType", "readmissionScore", "laceScore", "caseAge", "confidence"]];
-
-    draftState.plan.assignmentGroups.forEach((group) => {
-      group.assignedCases.forEach((caseItem) => {
-        rows.push([
-          group.nurse.nurseName,
-          caseItem.memberId,
-          caseItem.client,
-          caseItem.state,
-          caseItem.caseType,
-          caseItem.readmissionScore,
-          caseItem.laceScore,
-          caseItem.caseAgeDays,
-          caseItem.assignmentConfidence
-        ]);
-      });
-    });
-
-    const csv = rows.map((row) => row.map((value) => `"${String(value).replaceAll('"', '""')}"`).join(",")).join("\n");
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
+    const rows = [["stage", "nurseName", "memberId", "client", "state", "caseType", "readmissionScore", "laceScore", "caseAge", "confidence"]];
+    draftState.plan.assignmentGroups.forEach((group) => group.assignedCases.forEach((item) => rows.push([
+      draftState.stage, group.nurse.nurseName, item.memberId, item.client, item.state,
+      item.caseType, item.readmissionScore, item.laceScore, item.caseAgeDays, item.assignmentConfidence
+    ])));
+    const csv = rows.map((row) => row.map((value) => {
+      const text = String(value);
+      const safe = /^[=+@\-\t\r\n]/.test(text) ? `'${text}` : text;
+      return `"${safe.replaceAll('"', '""')}"`;
+    }).join(",")).join("\r\n");
+    const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
     const link = document.createElement("a");
     link.href = url;
-    link.download = `${workspaceId}-assignments.csv`;
+    link.download = `${workspaceId}-${draftState.stage}-assignments.csv`;
     link.click();
-    URL.revokeObjectURL(url);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
   };
 
-  const handleRemove = (caseItem, nurse) => {
-    const timestamp = new Date().toISOString();
-    setDraftState((current) => {
-      const nextPlan = removeCaseFromPlan(current.plan, caseItem.caseId);
-      return {
-        ...current,
-        plan: nextPlan,
-        stage: "review",
-        recentChanges: [{ message: `Removed ${caseItem.memberId} from ${nurse.nurseName}.`, at: timestamp }].concat(current.recentChanges).slice(0, 8),
-        overrideLog: [{ message: `Removed ${caseItem.memberId} from ${nurse.nurseName}`, at: timestamp }].concat(current.overrideLog).slice(0, 12)
-      };
+  const openOverride = (caseItem, nurse, action) => {
+    const effective = getWorkflowInputs(draftState, inputs);
+    const options = action === "remove" ? [] : getEligibleNurseOptions({
+      workspaceId, caseItem, nurses: effective.nurses, assignments: draftState.plan.assignments,
+      excludeNurseId: nurse?.nurseId
     });
+    setOverride({ caseItem, nurse, action, options });
+    setError("");
   };
-
-  const handleReassign = (caseItem, nurse) => {
-    const options = getEligibleNurseOptions({
-      workspaceId,
-      caseItem,
-      nurses,
-      assignments: flattenAssignments(draftState.plan.assignmentGroups),
-      excludeNurseId: nurse.nurseId
-    });
-
-    if (!options.length) {
-      return;
+  const commitOverride = (nurseId, reason) => {
+    const next = transition(() => applyOverride(draftState, { caseId: override.caseItem.caseId, nurseId, reason }, inputs), "Override saved with its reason. Review the updated draft before publishing.");
+    if (next) {
+      setOverride(null);
+      if (nurseId) setExpandedGroups((current) => new Set([...current, nurseId]));
     }
-
-    const nextNurse = options[0];
-    const timestamp = new Date().toISOString();
-
-    setDraftState((current) => {
-      const nextPlan = reassignCaseInPlan(current.plan, caseItem, nurse, nextNurse, workspace);
-      return {
-        ...current,
-        plan: nextPlan,
-        stage: "review",
-        recentChanges: [{ message: `Reassigned ${caseItem.memberId} to ${nextNurse.nurseName}.`, at: timestamp }].concat(current.recentChanges).slice(0, 8),
-        overrideLog: [{ message: `Reassigned ${caseItem.memberId} from ${nurse.nurseName} to ${nextNurse.nurseName}`, at: timestamp }].concat(current.overrideLog).slice(0, 12)
-      };
-    });
-    setExpandedGroups((current) => {
-      const next = new Set(current);
-      next.add(nextNurse.nurseId);
-      return next;
-    });
   };
-
-  const assignmentColumns = createAssignmentColumns({
-    onOpenCase: openCase,
-    onReassign: handleReassign,
-    onRemove: handleRemove
-  });
-  const overflowColumns = createOverflowColumns({ onOpenCase: openCase });
+  const assignmentColumns = createAssignmentColumns({ onOpenCase: openCase, onReassign: (item, nurse) => openOverride(item, nurse, "assign"), onRemove: (item, nurse) => openOverride(item, nurse, "remove"), disabled: editingDisabled });
+  const overflowColumns = createOverflowColumns({ onOpenCase: openCase, onAssign: (item) => openOverride(item, null, "assign"), disabled: editingDisabled });
   const agingColumns = createAgingColumns({ onOpenCase: openCase });
   const exceptionColumns = createExceptionColumns({ onOpenCase: openCase });
-
   const metrics = draftState.plan.metrics;
   const overflowSummary = draftState.plan.overflowSummary;
-
   return (
     <section className="workspace-shell">
       <header className="workspace-command-bar">
@@ -195,14 +124,17 @@ export function OpsWorkspace({ workspaceId, initialCases, initialNurses }) {
           </div>
         </div>
         <div className="command-actions">
-          <button className="primary-action" onClick={handleGenerate} disabled={isPending}>Generate assignments</button>
-          <button className="secondary-action" onClick={handleReview}>Review draft</button>
-          <button className="secondary-action" onClick={handlePublish}>Publish assignments</button>
+          <button className="primary-action" onClick={handleGenerate}>{locked ? "Start next run" : "Generate assignments"}</button>
+          <button className="secondary-action" onClick={handleReview} disabled={editingDisabled || draftState.stage === "reviewed"}>Review draft</button>
+          <button className="secondary-action" onClick={() => setConfirmation("publish")} disabled={editingDisabled || draftState.stage !== "reviewed"}>Publish assignments</button>
           <button className="ghost-action" onClick={handleExport}>Export</button>
-          <button className="ghost-action" onClick={handleRefresh}>Refresh data</button>
         </div>
       </header>
 
+      {source.rosterChanged ? <div className="notice warning" role="status">Roster changed. Generate a new draft to apply the latest eligibility rules. Published snapshots remain saved.</div> : null}
+      {error ? <div className="notice error" role="alert">{error}</div> : null}
+      {notice ? <div className="notice" role="status">{notice}</div> : null}
+      <div className="workflow-guide">1. Generate → 2. Inspect and override → 3. Review → 4. Publish · {locked ? "Published snapshot is locked." : "Publishing requires a reviewed draft."}</div>
       <section className="kpi-grid">
         <KpiCard label="Open Cases" value={metrics.openCases} />
         <KpiCard label="High-Risk Open" value={metrics.highRiskOpen} tone="danger" />
@@ -236,13 +168,16 @@ export function OpsWorkspace({ workspaceId, initialCases, initialNurses }) {
         </section>
       ) : null}
 
+      <section className="alert-strip" aria-label="Assignment alerts">
+        {draftState.plan.alerts.length ? draftState.plan.alerts.map((alert) => <div key={alert.id} className={`notice ${alert.severity === "danger" ? "error" : "warning"}`}><strong>{alert.title}</strong><div>{alert.message}</div></div>) : <div className="notice">No unresolved overflow or aging alerts.</div>}
+      </section>
       <section className="workflow-grid">
         <div className="workflow-main">
           <div className="panel">
             <div className="panel-header split">
               <div>
                 <div className="panel-label">Recommended Assignments</div>
-                <h2>Draft assignments by nurse</h2>
+                <h2>{locked ? "Published" : "Draft"} assignments by nurse</h2>
               </div>
               <div className="panel-controls">
                 <input
@@ -250,9 +185,9 @@ export function OpsWorkspace({ workspaceId, initialCases, initialNurses }) {
                   type="search"
                   value={assignmentSearch}
                   onChange={(event) => setAssignmentSearch(event.target.value)}
-                  placeholder="Search nurse, member, client, state"
+                  aria-label="Search assignments" placeholder="Search nurse, member, client, state"
                 />
-                <select className="table-select" value={assignmentSort} onChange={(event) => setAssignmentSort(event.target.value)}>
+                <select aria-label="Sort assignment groups" className="table-select" value={assignmentSort} onChange={(event) => setAssignmentSort(event.target.value)}>
                   <option value="assigned">Assigned count</option>
                   <option value="nurse">Nurse A-Z</option>
                   <option value="capacity">Remaining capacity</option>
@@ -270,7 +205,7 @@ export function OpsWorkspace({ workspaceId, initialCases, initialNurses }) {
 
                 return (
                   <section key={group.nurse.nurseId} className="assignment-group">
-                    <button type="button" className="group-summary" onClick={() => toggleGroup(group.nurse.nurseId)}>
+                    <button type="button" className="group-summary" aria-expanded={open} onClick={() => toggleGroup(group.nurse.nurseId)}>
                       <div>
                         <div className="group-title-row">
                           <h3>{group.nurse.nurseName}</h3>
@@ -324,7 +259,7 @@ export function OpsWorkspace({ workspaceId, initialCases, initialNurses }) {
               type="search"
               value={overflowSearch}
               onChange={(event) => setOverflowSearch(event.target.value)}
-              placeholder="Search overflow by member, client, state"
+              aria-label="Search overflow" placeholder="Search overflow by member, client, state"
             />
             <DataTable
               data={overflowRows}
@@ -390,7 +325,12 @@ export function OpsWorkspace({ workspaceId, initialCases, initialNurses }) {
         </div>
       </section>
 
-      <CaseDetailDrawer caseModel={selectedCase} onClose={() => setSelectedCase(null)} />
+      {selectedCase ? <CaseDetailDrawer caseModel={selectedCase} onClose={() => setSelectedCase(null)} /> : null}
+      {override ? <OverrideDialog override={override} error={error} onClose={() => setOverride(null)} onSave={commitOverride} /> : null}
+      {confirmation ? <Modal title={confirmation === "publish" ? "Publish reviewed assignments" : "Regenerate draft"} onClose={() => setConfirmation(null)}>
+        <p>{confirmation === "publish" ? `Publish ${draftState.plan.assignmentGroups.reduce((total, group) => total + group.assignedCases.length, 0)} assignments? ${draftState.plan.overflow.length} cases remain unassigned, including ${metrics.unassignedHighRisk} high-risk cases. The saved snapshot will be locked.` : "This will replace the current draft and its manual overrides with a new assignment run."}</p>
+        <button className="primary-action" onClick={confirmation === "publish" ? handlePublish : generate}>{confirmation === "publish" ? "Confirm publish" : "Regenerate draft"}</button>
+      </Modal> : null}
     </section>
   );
 }
@@ -421,15 +361,8 @@ function CaseDetailDrawer({ caseModel, onClose }) {
   if (!caseModel) return null;
 
   return (
-    <div className="drawer-backdrop" onClick={onClose}>
-      <aside className="case-drawer" onClick={(event) => event.stopPropagation()}>
-        <div className="drawer-header">
-          <div>
-            <div className="panel-label">Case Detail</div>
-            <h2>{caseModel.memberId}</h2>
-          </div>
-          <button className="ghost-action" onClick={onClose}>Close</button>
-        </div>
+    <Modal title={`Case ${caseModel.memberId}`} onClose={onClose}>
+      <section>
         <dl className="drawer-grid">
           <DrawerItem label="Client" value={caseModel.client} />
           <DrawerItem label="State" value={caseModel.state} />
@@ -451,8 +384,8 @@ function CaseDetailDrawer({ caseModel, onClose }) {
           <div className="drawer-label">Why this nurse is eligible</div>
           <p>{caseModel.nurseEligibilitySummary}</p>
         </div>
-      </aside>
-    </div>
+      </section>
+    </Modal>
   );
 }
 
@@ -465,7 +398,7 @@ function DrawerItem({ label, value }) {
   );
 }
 
-function createAssignmentColumns({ onOpenCase, onReassign, onRemove }) {
+function createAssignmentColumns({ onOpenCase, onReassign, onRemove, disabled }) {
   return [
     {
       accessorKey: "memberId",
@@ -530,8 +463,8 @@ function createAssignmentColumns({ onOpenCase, onReassign, onRemove }) {
       enableSorting: false,
       cell: ({ row }) => (
         <div className="action-row">
-          <button className="row-action" onClick={() => onReassign(row.original, row.original._nurse)}>Reassign</button>
-          <button className="row-action" onClick={() => onRemove(row.original, row.original._nurse)}>Remove</button>
+          <button className="row-action" disabled={disabled} onClick={() => onReassign(row.original, row.original._nurse)}>Reassign</button>
+          <button className="row-action" disabled={disabled} onClick={() => onRemove(row.original, row.original._nurse)}>Remove</button>
           <button className="row-action inspect" onClick={() => onOpenCase(row.original, row.original._nurse)}>Inspect</button>
         </div>
       )
@@ -539,8 +472,9 @@ function createAssignmentColumns({ onOpenCase, onReassign, onRemove }) {
   ];
 }
 
-function createOverflowColumns({ onOpenCase }) {
+function createOverflowColumns({ onOpenCase, onAssign, disabled }) {
   return [
+    { id: "assign", header: "Action", enableSorting: false, cell: ({ row }) => <button className="row-action" disabled={disabled} onClick={() => onAssign(row.original)}>Assign</button> },
     {
       accessorKey: "memberId",
       header: "Member",
@@ -648,28 +582,6 @@ function createExceptionColumns({ onOpenCase }) {
   ];
 }
 
-function createDraftState(workspaceId, cases, nurses, timestamp = new Date().toISOString()) {
-  const plan = generateDraftPlan({ workspaceId, cases, nurses, lastRunAt: timestamp });
-  const assignmentGroups = plan.assignmentGroups.map((group) => ({
-    ...group,
-    assignedCases: group.assignedCases.map((caseItem) => ({
-      ...caseItem,
-      _nurse: group.nurse
-    }))
-  }));
-
-  return {
-    stage: "draft",
-    publishedAt: null,
-    plan: {
-      ...plan,
-      assignmentGroups
-    },
-    recentChanges: [{ message: "Loaded current draft assignments.", at: timestamp }],
-    overrideLog: []
-  };
-}
-
 function getDefaultExpandedGroups(groups) {
   return new Set(groups.slice(0, 2).map((group) => group.nurse.nurseId));
 }
@@ -706,100 +618,6 @@ function filterOverflowRows(rows, search) {
   return rows.filter((item) => `${item.memberId} ${item.client} ${item.state} ${item.blockerReason}`.toLowerCase().includes(normalizedSearch));
 }
 
-function flattenAssignments(groups) {
-  return groups.flatMap((group) => group.assignedCases.map((caseItem) => ({
-    caseId: caseItem.caseId,
-    nurseId: group.nurse.nurseId
-  })));
-}
-
-function removeCaseFromPlan(plan, caseId) {
-  const nextGroups = [];
-  let removedCase = null;
-
-  plan.assignmentGroups.forEach((group) => {
-    const remainingCases = group.assignedCases.filter((item) => {
-      if (item.caseId === caseId) {
-        removedCase = item;
-        return false;
-      }
-      return true;
-    });
-
-    if (remainingCases.length) {
-      nextGroups.push({ ...group, assignedCases: remainingCases });
-    }
-  });
-
-  if (!removedCase) return plan;
-
-  const nextOverflow = [{ ...removedCase, blockerReason: "Removed during review", blockerTone: "warning" }]
-    .concat(plan.overflow.filter((item) => item.caseId !== caseId));
-
-  return rebuildPlanFromOverrides(plan, nextGroups, nextOverflow);
-}
-
-function reassignCaseInPlan(plan, caseItem, currentNurse, nextNurse, workspace) {
-  const removed = removeCaseFromPlan(plan, caseItem.caseId);
-  const nurseGroupExists = removed.assignmentGroups.some((group) => group.nurse.nurseId === nextNurse.nurseId);
-  const reassignedCase = {
-    ...caseItem,
-    _nurse: nextNurse,
-    assignmentConfidence: "Manual override",
-    assignmentExplanation: `Assigned because ${caseItem.priorityReasons.concat(["Eligible by client", "Eligible by state license", "Capacity available"]).join(", ").toLowerCase()}.`
-  };
-
-  const nextGroups = removed.assignmentGroups.map((group) => {
-    if (group.nurse.nurseId !== nextNurse.nurseId) return group;
-    return {
-      ...group,
-      assignedCases: group.assignedCases.concat(reassignedCase).sort((left, right) => right.readmissionScore - left.readmissionScore)
-    };
-  });
-
-  if (!nurseGroupExists) {
-    nextGroups.push({
-      nurse: nextNurse,
-      assignedCases: [reassignedCase]
-    });
-  }
-
-  return rebuildPlanFromOverrides(removed, nextGroups, removed.overflow.filter((item) => item.caseId !== caseItem.caseId), workspace);
-}
-
-function rebuildPlanFromOverrides(plan, assignmentGroups, overflowRows) {
-  const highRiskUnassigned = overflowRows.filter((item) => item.readmissionScore >= 75).length;
-  const oldestUnassigned = overflowRows.length ? Math.max(...overflowRows.map((item) => item.caseAgeDays)) : 0;
-
-  return {
-    ...plan,
-    assignmentGroups: assignmentGroups.sort((left, right) => right.assignedCases.length - left.assignedCases.length),
-    overflow: overflowRows,
-    overflowSummary: {
-      ...plan.overflowSummary,
-      highRiskUnassigned,
-      oldestUnassigned,
-      noEligibleNurse: overflowRows.filter((item) => item.blockerReason.includes("eligible") || item.blockerReason.includes("team")).length,
-      noCapacity: overflowRows.filter((item) => item.blockerReason.includes("capacity")).length
-    },
-    metrics: {
-      ...plan.metrics,
-      unassignedHighRisk: highRiskUnassigned
-    },
-    exceptions: overflowRows.slice(0, 12),
-    agingWatchlist: plan.agingWatchlist.map((item) => {
-      const matchingOverflow = overflowRows.find((overflow) => overflow.caseId === item.caseId);
-      if (matchingOverflow) {
-        return { ...item, status: "Open", reason: matchingOverflow.blockerReason || item.reason };
-      }
-      if (assignmentGroups.some((group) => group.assignedCases.some((assignedCase) => assignedCase.caseId === item.caseId))) {
-        return { ...item, status: "Draft assigned" };
-      }
-      return item;
-    })
-  };
-}
-
 function formatRunTime(value) {
   return new Intl.DateTimeFormat("en-US", {
     month: "short",
@@ -807,4 +625,24 @@ function formatRunTime(value) {
     hour: "numeric",
     minute: "2-digit"
   }).format(new Date(value));
+}
+
+function OverrideDialog({ override, error, onClose, onSave }) {
+  const [nurseId, setNurseId] = useState(override.options[0]?.nurseId || "");
+  const [reason, setReason] = useState("");
+  const removing = override.action === "remove";
+  return <Modal title={`${removing ? "Remove" : "Assign"} ${override.caseItem.memberId}`} onClose={onClose}>
+    <form className="override-form" onSubmit={(event) => { event.preventDefault(); onSave(removing ? null : nurseId, reason); }}>
+      <p>{removing ? "Return this case to overflow for further review." : "Choose an eligible nurse. Current assignments and existing workload count toward capacity."}</p>
+      {!removing ? <label>Eligible nurse
+        <select className="table-select" value={nurseId} onChange={(event) => setNurseId(event.target.value)} required>
+          {override.options.length ? override.options.map((nurse) => <option key={nurse.nurseId} value={nurse.nurseId}>{nurse.nurseName} · {nurse.team}</option>) : <option value="">No eligible nurse with capacity</option>}
+        </select>
+      </label> : null}
+      {!removing && !override.options.length ? <p className="notice warning">No eligible nurse is available. Update the roster or free capacity, then generate a new draft.</p> : null}
+      <label>Override reason<textarea required maxLength={500} rows={3} value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Explain the operational reason for this change" /></label>
+      {error ? <p className="notice error" role="alert">{error}</p> : null}
+      <button className="primary-action" disabled={!reason.trim() || (!removing && !nurseId)}>Save override</button>
+    </form>
+  </Modal>;
 }
